@@ -1,0 +1,193 @@
+{
+  "name": "CRA Tax AI Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "46094899-977c-48ae-a9dd-4b77a6b4f04c",
+      "name": "When chat message received",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        576,
+        -176
+      ],
+      "webhookId": "cra-tax-agent-webhook"
+    },
+    {
+      "parameters": {
+        "options": {
+          "systemMessage": "# CRA Tax Optimization Agent — System Prompt\n\nYou are a Canadian tax optimization assistant with deep knowledge of:\n- Canada Revenue Agency (CRA) rules for 2024 and 2025 tax years\n- Federal and provincial tax brackets (all provinces/territories)\n- RRSP, TFSA, FHSA, RESP, RDSP contribution rules and limits\n- Capital gains inclusion rate changes (2024 budget: 2/3 above $250k)\n- Small business deductions (SBD), CCPC rules\n- GST/HST credits, Canada Child Benefit (CCB)\n- Employment expenses (T2200), home office deductions\n- Principal residence exemption, rental income rules\n- Foreign income reporting (T1135)\n\nALWAYS:\n- Ask for province of residence before giving provincial tax estimates\n- Ask for filing status (single, married, common-law, separated)\n- Clarify employment type (T4 employee, self-employed, corporation owner)\n- Use the calculate_canadian_tax tool for any numerical estimates\n- Cite the CRA form or publication relevant to each strategy\n- Add disclaimer: \"This is general information, not professional tax advice\"\n\nNEVER:\n- Advise on tax evasion or illegal shelters\n- Give definitive advice without knowing the user's full situation\n- Make up CRA rules — use tools to verify or say \"please confirm with CRA\"\n\nOptimization strategies to consider (when applicable):\n1. RRSP contribution timing and spousal RRSP splitting\n2. TFSA vs RRSP room optimization based on income bracket\n3. Income splitting with family members (legally)\n4. Loss harvesting for non-registered accounts\n5. Deferring capital gains to next tax year\n6. Salary vs dividend mix for incorporated individuals\n7. Corporate retained earnings and passive income thresholds ($50k)\n8. CRA installment payment optimization"
+        }
+      },
+      "id": "9723ee87-ec2a-4622-a789-f622f7cfdab7",
+      "name": "CRA Tax AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        992,
+        -176
+      ]
+    },
+    {
+      "parameters": {
+        "contextWindowLength": 10
+      },
+      "id": "43876dfd-9de2-49c3-8844-6e013ee8ad57",
+      "name": "Window Buffer Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.2,
+      "position": [
+        880,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "name": "calculate_canadian_tax",
+        "description": "Calculates estimated Canadian federal income tax given gross income, optional RRSP contribution, and province. Returns taxable income, estimated federal tax, marginal rate, and RRSP tax savings. Note: does not include provincial tax — advise user to add provincial rate separately.",
+        "jsCode": "// Canadian Federal Tax Calculator 2024\n// Inputs come from the AI agent as JSON arguments\nconst args = JSON.parse($input.first().json.query || '{}');\n\nconst income = parseFloat(args.income) || 0;\nconst rrsp = parseFloat(args.rrspContribution) || 0;\nconst province = args.province || 'Not specified';\nconst taxableIncome = Math.max(0, income - rrsp);\n\n// 2024 Federal tax brackets\nconst federalBrackets = [\n  { limit: 55867,   rate: 0.15  },\n  { limit: 111733,  rate: 0.205 },\n  { limit: 154906,  rate: 0.26  },\n  { limit: 220000,  rate: 0.29  },\n  { limit: Infinity, rate: 0.33 },\n];\n\n// 2024 Provincial top marginal rates (approximate — for reference)\nconst provincialTopRates = {\n  'AB': 0.15, 'BC': 0.205, 'MB': 0.174, 'NB': 0.198,\n  'NL': 0.218, 'NS': 0.21, 'NT': 0.1405, 'NU': 0.1195,\n  'ON': 0.1316, 'PE': 0.165, 'QC': 0.2575, 'SK': 0.145, 'YT': 0.15\n};\n\nfunction calcTax(income, brackets) {\n  let tax = 0, prev = 0;\n  for (const b of brackets) {\n    if (income <= 0) break;\n    const chunk = Math.min(income, b.limit - prev);\n    tax += chunk * b.rate;\n    income -= chunk;\n    prev = b.limit;\n  }\n  return tax;\n}\n\n// 2024 Basic Personal Amount\nconst BPA = 15705;\nconst federalTax = calcTax(Math.max(0, taxableIncome - BPA), federalBrackets);\nconst bpaTaxCredit = BPA * 0.15; // 15% credit on BPA\nconst netFederalTax = Math.max(0, federalTax - bpaTaxCredit);\n\n// Find marginal bracket\nconst marginalBracket = federalBrackets.find(b => taxableIncome <= b.limit);\nconst marginalRate = marginalBracket ? marginalBracket.rate : 0.33;\nconst rrspTaxSaving = rrsp * marginalRate;\n\n// Capital gains note (2024 budget change)\nlet capitalGainsNote = '';\nif (income > 250000) {\n  capitalGainsNote = 'Note: Capital gains above $250,000 are now included at 2/3 (66.67%) per 2024 federal budget.';\n}\n\nreturn [{\n  json: {\n    inputs: { grossIncome: income, rrspContribution: rrsp, province },\n    results: {\n      taxableIncome: Math.round(taxableIncome),\n      estimatedFederalTax: Math.round(netFederalTax),\n      marginalFederalRate: `${(marginalRate * 100).toFixed(1)}%`,\n      effectiveFederalRate: income > 0 ? `${((netFederalTax / income) * 100).toFixed(2)}%` : '0%',\n      rrspTaxSaving: Math.round(rrspTaxSaving),\n      basicPersonalAmount: BPA,\n    },\n    provincialNote: province !== 'Not specified'\n      ? `Provincial tax for ${province} not included in calculation. Approximate top provincial rate: ${provincialTopRates[province.toUpperCase()] ? (provincialTopRates[province.toUpperCase()] * 100).toFixed(2) + '%' : 'look up current rate on CRA website'}.`\n      : 'Please provide province for a more complete estimate.',\n    capitalGainsNote,\n    disclaimer: 'This is a simplified federal estimate only. Consult a tax professional for complete advice. Source: CRA T1 General 2024.'\n  }\n}];"
+      },
+      "id": "c6242255-4e4d-4985-82a8-4268e673ec44",
+      "name": "calculate_canadian_tax",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.1,
+      "position": [
+        1040,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "name": "get_cra_contribution_limits",
+        "description": "Returns current CRA contribution limits and key thresholds for RRSP, TFSA, FHSA, RESP, CPP, and EI for the 2024 and 2025 tax years.",
+        "jsCode": "// CRA Contribution Limits & Key Thresholds\n// Data accurate as of 2024/2025 tax years\n\nconst limits = {\n  taxYear2024: {\n    RRSP: {\n      contributionLimit: 31560,\n      earnedIncomeRate: 0.18,\n      note: '18% of prior year earned income, up to $31,560. Unused room carries forward indefinitely.'\n    },\n    TFSA: {\n      annualRoom: 7000,\n      cumulativeSince2009: 95000,\n      note: 'Room accumulates every year starting at age 18. Withdrawals re-added next calendar year.'\n    },\n    FHSA: {\n      annualLimit: 8000,\n      lifetimeLimit: 40000,\n      note: 'First Home Savings Account. Must be first-time buyer. Contributions tax-deductible, withdrawals tax-free for qualifying home purchase.'\n    },\n    RESP: {\n      annualCESGLimit: 2500,\n      lifetimeLimit: 50000,\n      cesgRate: 0.20,\n      note: 'Government matches 20% on first $2,500/year per child (max $500 CESG/year). Lifetime CESG max $7,200.'\n    },\n    CPP: {\n      maximumPensionableEarnings: 68500,\n      basicExemption: 3500,\n      employeeRate: 0.0595,\n      maximumContribution: 3867,\n      CPP2threshold: 73200,\n      CPP2rate: 0.04,\n      note: 'CPP2 applies on earnings between $68,500 and $73,200 at 4%.'\n    },\n    EI: {\n      maximumInsurableEarnings: 63200,\n      employeeRate: 0.0166,\n      maximumPremium: 1049,\n      note: 'EI premiums capped at maximum insurable earnings.'\n    },\n    capitalGains: {\n      inclusionRateBelow250k: 0.50,\n      inclusionRateAbove250k: 0.6667,\n      lifetimeCapitalGainsExemption: 1250000,\n      note: '2024 budget increased inclusion rate to 2/3 on capital gains exceeding $250,000/year for individuals.'\n    },\n    smallBusiness: {\n      SBDRate: 0.09,\n      generalCorporateRate: 0.15,\n      SBDLimit: 500000,\n      passiveIncomeThreshold: 50000,\n      note: 'SBD phases out when passive investment income exceeds $50k/year, eliminated at $150k.'\n    }\n  },\n  taxYear2025: {\n    RRSP: { contributionLimit: 32490, note: 'Indexed to inflation.' },\n    TFSA: { annualRoom: 7000, cumulativeSince2009: 102000 },\n    CPP: { maximumPensionableEarnings: 71300, note: 'Preliminary — confirm on CRA website.' }\n  }\n};\n\nreturn [{ json: limits }];"
+      },
+      "id": "558a6b2c-7572-4fe9-8650-713e6045e8ca",
+      "name": "get_cra_contribution_limits",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.1,
+      "position": [
+        1200,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "name": "get_provincial_tax_brackets",
+        "description": "Returns provincial income tax brackets and rates for a given Canadian province for the 2024 tax year. Input must include 'province' as a 2-letter code (e.g. ON, BC, AB, QC).",
+        "jsCode": "// Provincial Tax Brackets 2024\nconst args = JSON.parse($input.first().json.query || '{}');\nconst province = (args.province || '').toUpperCase().trim();\n\nconst provincialData = {\n  ON: {\n    name: 'Ontario',\n    brackets: [\n      { upTo: 51446, rate: 0.0505 },\n      { upTo: 102894, rate: 0.0915 },\n      { upTo: 150000, rate: 0.1116 },\n      { upTo: 220000, rate: 0.1216 },\n      { upTo: Infinity, rate: 0.1316 }\n    ],\n    surtax: 'Ontario surtax applies: 20% on provincial tax over $5,315; additional 36% on tax over $6,802.',\n    basicPersonalAmount: 11865\n  },\n  BC: {\n    name: 'British Columbia',\n    brackets: [\n      { upTo: 45654, rate: 0.0506 },\n      { upTo: 91310, rate: 0.077 },\n      { upTo: 104835, rate: 0.105 },\n      { upTo: 127299, rate: 0.1229 },\n      { upTo: 172602, rate: 0.147 },\n      { upTo: 240716, rate: 0.168 },\n      { upTo: Infinity, rate: 0.205 }\n    ],\n    basicPersonalAmount: 11981\n  },\n  AB: {\n    name: 'Alberta',\n    brackets: [\n      { upTo: 148269, rate: 0.10 },\n      { upTo: 177922, rate: 0.12 },\n      { upTo: 237230, rate: 0.13 },\n      { upTo: 355845, rate: 0.14 },\n      { upTo: Infinity, rate: 0.15 }\n    ],\n    basicPersonalAmount: 21003,\n    note: 'No provincial surtax. No provincial sales tax (PST).'\n  },\n  QC: {\n    name: 'Quebec',\n    brackets: [\n      { upTo: 51780, rate: 0.14 },\n      { upTo: 103545, rate: 0.19 },\n      { upTo: 126000, rate: 0.24 },\n      { upTo: Infinity, rate: 0.2575 }\n    ],\n    basicPersonalAmount: 17183,\n    note: 'Quebec files separate provincial return (TP1). Abatement of 16.5% of federal tax applies.'\n  },\n  MB: {\n    name: 'Manitoba',\n    brackets: [\n      { upTo: 36842, rate: 0.108 },\n      { upTo: 79625, rate: 0.1275 },\n      { upTo: Infinity, rate: 0.174 }\n    ],\n    basicPersonalAmount: 15780\n  },\n  SK: {\n    name: 'Saskatchewan',\n    brackets: [\n      { upTo: 49720, rate: 0.105 },\n      { upTo: 142058, rate: 0.125 },\n      { upTo: Infinity, rate: 0.145 }\n    ],\n    basicPersonalAmount: 17661\n  },\n  NS: {\n    name: 'Nova Scotia',\n    brackets: [\n      { upTo: 29590, rate: 0.0879 },\n      { upTo: 59180, rate: 0.1495 },\n      { upTo: 93000, rate: 0.1667 },\n      { upTo: 150000, rate: 0.175 },\n      { upTo: Infinity, rate: 0.21 }\n    ],\n    basicPersonalAmount: 8481\n  },\n  NB: {\n    name: 'New Brunswick',\n    brackets: [\n      { upTo: 47715, rate: 0.094 },\n      { upTo: 95431, rate: 0.14 },\n      { upTo: 176756, rate: 0.16 },\n      { upTo: Infinity, rate: 0.198 }\n    ],\n    basicPersonalAmount: 12458\n  },\n  PE: {\n    name: 'Prince Edward Island',\n    brackets: [\n      { upTo: 32656, rate: 0.096 },\n      { upTo: 64313, rate: 0.1337 },\n      { upTo: 105000, rate: 0.167 },\n      { upTo: 140000, rate: 0.18 },\n      { upTo: Infinity, rate: 0.1875 }\n    ],\n    basicPersonalAmount: 12000\n  },\n  NL: {\n    name: 'Newfoundland and Labrador',\n    brackets: [\n      { upTo: 43198, rate: 0.087 },\n      { upTo: 86395, rate: 0.145 },\n      { upTo: 154244, rate: 0.158 },\n      { upTo: 215943, rate: 0.178 },\n      { upTo: 275870, rate: 0.198 },\n      { upTo: 551739, rate: 0.208 },\n      { upTo: Infinity, rate: 0.218 }\n    ],\n    basicPersonalAmount: 10818\n  }\n};\n\nif (!province || !provincialData[province]) {\n  return [{ json: {\n    error: `Province '${province}' not found. Use 2-letter codes: ON, BC, AB, QC, MB, SK, NS, NB, PE, NL`,\n    availableProvinces: Object.keys(provincialData)\n  }}];\n}\n\nreturn [{ json: { province, ...provincialData[province], disclaimer: 'Rates are for 2024 tax year. Confirm on canada.ca/taxes.' } }];"
+      },
+      "id": "18cda10d-995e-47be-8de0-b346b955f6e8",
+      "name": "get_provincial_tax_brackets",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.1,
+      "position": [
+        1376,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        720,
+        48
+      ],
+      "id": "8eb98d87-4101-4bc5-8971-03e61d44b263",
+      "name": "Google Gemini Chat Model",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "mxOD2IbUdIuYy7wy",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "CRA Tax AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Window Buffer Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "CRA Tax AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calculate_canadian_tax": {
+      "ai_tool": [
+        [
+          {
+            "node": "CRA Tax AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get_cra_contribution_limits": {
+      "ai_tool": [
+        [
+          {
+            "node": "CRA Tax AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get_provincial_tax_brackets": {
+      "ai_tool": [
+        [
+          {
+            "node": "CRA Tax AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "CRA Tax AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "540f6de9-457e-4ed5-8e21-b953a7ba87ed",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "5bf5f63beeb31621c2e06be4b139a744c9521f9761cf329a1f568302c6e44b5e"
+  },
+  "id": "u0qXYTOU6OARKtZS",
+  "tags": []
+}
